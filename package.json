@@ -1,6 +1,7 @@
 {
   "name": "hazardwatch",
   "private": true,
+  "packageManager": "npm@11.9.0",
   "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "dev": "turbo run dev",
