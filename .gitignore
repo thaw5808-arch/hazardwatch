@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment variables (CRITICAL - contains API keys and secrets)
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+
+# Next.js build output
+.next/
+**/.next/
+out/
+
+# NestJS build output
+dist/
+**/dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Testing
+coverage/

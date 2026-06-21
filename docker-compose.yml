@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: hazardwatch_pg
+    environment:
+      POSTGRES_DB: hazardwatch
+      POSTGRES_USER: hw_user
+      POSTGRES_PASSWORD: hw_local_secret
+    ports:
+      - "5435:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./infra/docker/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hw_user -d hazardwatch"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: hazardwatch_redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      retries: 5
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: ../../infra/docker/Dockerfile.api
+      target: development
+    container_name: hazardwatch_api
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis:    { condition: service_healthy }
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://hw_user:hw_local_secret@postgres:5432/hazardwatch
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: development
+      PORT: 3001
+      FRONTEND_URL: http://localhost:3002
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./apps/api/src:/app/src
+    command: npm run start:dev
+
+volumes:
+  pg_data:
