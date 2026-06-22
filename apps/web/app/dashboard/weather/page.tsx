@@ -46,8 +46,8 @@ export default function WeatherPage() {
     if (!lat || !lon) return;
     const api = process.env.NEXT_PUBLIC_API_URL;
     Promise.all([
-      fetch(`${api}/v1/weather/current?lat=${lat}&lon=${lon}`).then(r => r.json()),
-      fetch(`${api}/v1/weather/forecast?lat=${lat}&lon=${lon}`).then(r => r.json()),
+      fetch(`${api}/v1/weather/current?lat=${lat}&lon=${lon}`).then(r => { if (!r.ok) throw new Error('current failed'); return r.json(); }),
+      fetch(`${api}/v1/weather/forecast?lat=${lat}&lon=${lon}`).then(r => { if (!r.ok) throw new Error('forecast failed'); return r.json(); }),
     ])
       .then(([currentData, forecastData]) => {
         setWeather(currentData as CurrentWeather);
