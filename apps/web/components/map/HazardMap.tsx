@@ -276,8 +276,12 @@ export default function HazardMap() {
       });
     });
 
+    const ro = new ResizeObserver(() => { localMap?.resize?.(); });
+    if (containerRef.current) ro.observe(containerRef.current);
+
     return () => {
       cancelled = true;
+      ro.disconnect();
       localMap?.remove?.();
       if (mapRef.current === localMap) mapRef.current = null;
     };
