@@ -47,7 +47,11 @@ export default function WeatherPage() {
     const api = process.env.NEXT_PUBLIC_API_URL;
     Promise.all([
       fetch(`${api}/v1/weather/current?lat=${lat}&lon=${lon}`).then(r => { if (!r.ok) throw new Error('current failed'); return r.json(); }),
-      fetch(`${api}/v1/weather/forecast?lat=${lat}&lon=${lon}`).then(r => { if (!r.ok) throw new Error('forecast failed'); return r.json(); }),
+      fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&hourly=temperature_2m,precipitation,wind_speed_10m,weathercode&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_max,weathercode,sunrise,sunset&timezone=auto&forecast_days=7`).then(r => { if (!r.ok) throw new Error('forecast failed'); return r.json(); }).then(data => ({
+        location: { lat, lon },
+        hourly: (data.hourly.time).slice(0, 48).map((t, i) => ({ time: t, temp_c: data.hourly.temperature_2m[i], precip_mm: data.hourly.precipitation[i], wind_speed_ms: data.hourly.wind_speed_10m[i], weather_code: data.hourly.weathercode[i] })),
+        daily: (data.daily.time).map((t, i) => ({ date: t, high_c: data.daily.temperature_2m_max[i], low_c: data.daily.temperature_2m_min[i], precip_mm: data.daily.precipitation_sum[i], precip_probability: data.daily.precipitation_probability_max[i] / 100, weather_code: data.daily.weathercode[i], sunrise: data.daily.sunrise[i], sunset: data.daily.sunset[i] }))
+      })),
     ])
       .then(([currentData, forecastData]) => {
         setWeather(currentData as CurrentWeather);
