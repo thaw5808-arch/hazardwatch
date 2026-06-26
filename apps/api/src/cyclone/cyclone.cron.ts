@@ -9,7 +9,7 @@ export class CycloneCron {
 
   @Cron('0 */15 * * * *')
   async handleCron() {
-    try { await this.svc.ingestNHC(); }
-    catch (err) { this.logger.error(`Cyclone ingest failed: ${(err as Error).message}`); }
+    try { await this.svc.ingestNHC(); } catch (err) { this.logger.error(`NHC ingest failed: ${(err as Error).message}`); }
+    try { await this.svc.ingestJTWC(); } catch (err) { this.logger.error(`JTWC ingest failed: ${(err as Error).message}`); }
   }
 }

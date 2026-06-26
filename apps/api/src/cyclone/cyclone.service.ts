@@ -182,14 +182,120 @@ export class CycloneService {
     // Mark storms no longer in NHC feed as inactive
     if (seenIds.length > 0) {
       await this.db.query(
-        `UPDATE cyclones SET is_active = FALSE WHERE is_active = TRUE AND storm_id NOT IN (${seenIds.map((_, i) => `$${i + 1}`).join(',')})`,
+        `UPDATE cyclones SET is_active = FALSE WHERE is_active = TRUE AND storm_id NOT LIKE 'JTWC_%' AND storm_id NOT IN (${seenIds.map((_, i) => `$${i + 1}`).join(',')})`,
         seenIds,
       );
     } else {
-      await this.db.query(`UPDATE cyclones SET is_active = FALSE WHERE is_active = TRUE`);
+      await this.db.query(`UPDATE cyclones SET is_active = FALSE WHERE is_active = TRUE AND storm_id NOT LIKE 'JTWC_%'`);
     }
 
     if (upserted > 0) this.logger.log(`NHC ingest: ${upserted} active storms`);
+    return upserted;
+  }
+
+  private classifyJTWC(typeStr: string): string {
+    const t = typeStr.toUpperCase();
+    if (t.includes('SUPER TYPHOON')) return 'super_typhoon';
+    if (t.includes('TYPHOON')) return 'typhoon';
+    if (t.includes('TROPICAL STORM')) return 'tropical_storm';
+    if (t.includes('TROPICAL DEPRESSION')) return 'tropical_depression';
+    if (t.includes('SUBTROPICAL STORM')) return 'subtropical_storm';
+    if (t.includes('SUBTROPICAL DEPRESSION')) return 'subtropical_depression';
+    return 'unknown';
+  }
+
+  async ingestJTWC(): Promise<number> {
+    let xmlData: string;
+    try {
+      const res = await axios.get<string>('https://www.metoc.navy.mil/jtwc/rss/jtwc.rss', {
+        timeout: 15000, httpsAgent: ipv4HttpsAgent, responseType: 'text',
+      });
+      xmlData = res.data;
+    } catch (err) {
+      this.logger.warn(`JTWC fetch failed: ${(err as Error).message}`);
+      return 0;
+    }
+
+    const items = xmlData.match(/<item>([\s\S]*?)<\/item>/g) ?? [];
+    let upserted = 0;
+    const seenIds: string[] = [];
+
+    for (const item of items) {
+      const titleMatch = item.match(/<title>(.*?)<\/title>/);
+      const descMatch = item.match(/<description>([\s\S]*?)<\/description>/);
+      const pubDateMatch = item.match(/<pubDate>(.*?)<\/pubDate>/);
+      if (!titleMatch || !descMatch) continue;
+
+      const title = titleMatch[1].replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+      const desc = descMatch[1].replace(/<!\[CDATA\[|\]\]>/g, '').trim();
+
+      // Parse title: "Typhoon 02W (MAWAR)" or "Tropical Storm 01W"
+      const titleParsed = title.match(/^(.*?)\s+(\d+[A-Z]+)\s*(?:\(([^)]+)\))?/i);
+      if (!titleParsed) continue;
+
+      const typeStr = titleParsed[1].trim();
+      const stormNum = titleParsed[2].trim();
+      const stormId = `JTWC_${stormNum}`;
+      const name = titleParsed[3] ?? stormNum;
+
+      // Parse position: "14.0N 131.0E" from description
+      const posMatch = desc.match(/located near (\d+\.?\d*)([NS])\s+(\d+\.?\d*)([EW])/i);
+      if (!posMatch) continue;
+
+      let lat = parseFloat(posMatch[1]);
+      let lon = parseFloat(posMatch[3]);
+      if (posMatch[2].toUpperCase() === 'S') lat = -lat;
+      if (posMatch[4].toUpperCase() === 'W') lon = -lon;
+      if (isNaN(lat) || isNaN(lon)) continue;
+
+      seenIds.push(stormId);
+
+      const windMatch = desc.match(/Maximum sustained winds are (\d+) knots/i);
+      const pressureMatch = desc.match(/Minimum central pressure is (\d+) mb/i);
+      const windKts = windMatch ? parseInt(windMatch[1]) : null;
+      const pressureMb = pressureMatch ? parseInt(pressureMatch[1]) : null;
+      const lastUpdate = pubDateMatch ? new Date(pubDateMatch[1]) : new Date();
+      const type = this.classifyJTWC(typeStr);
+      const category = (type === 'typhoon' || type === 'super_typhoon') ? this.saffirSimpson(windKts) : null;
+      const basin = this.inferBasin(lon, lat);
+
+      const { rows: existing } = await this.db.query('SELECT id FROM cyclones WHERE storm_id = $1', [stormId]);
+      if (existing.length > 0) {
+        await this.db.query(`
+          UPDATE cyclones SET name=$2, basin=$3, category=$4, storm_type=$5, is_active=TRUE,
+            current_center=ST_MakePoint($6,$7)::geography,
+            wind_speed_kts=$8, pressure_mb=$9, last_updated_at=$10, raw_data=$11
+          WHERE storm_id=$1
+        `, [stormId, name, basin, category, type, lon, lat, windKts, pressureMb, lastUpdate, JSON.stringify({ title, desc })]);
+      } else {
+        await this.db.query(`
+          INSERT INTO cyclones (storm_id, name, basin, category, storm_type, is_active, current_center,
+            wind_speed_kts, pressure_mb, first_seen_at, last_updated_at, raw_data)
+          VALUES ($1,$2,$3,$4,$5,TRUE,ST_MakePoint($6,$7)::geography,$8,$9,$10,$10,$11)
+        `, [stormId, name, basin, category, type, lon, lat, windKts, pressureMb, lastUpdate, JSON.stringify({ title, desc })]);
+
+        const { rows: created } = await this.db.query('SELECT id FROM cyclones WHERE storm_id=$1', [stormId]);
+        if (created[0]) {
+          await this.db.query(`
+            INSERT INTO cyclone_track_points (cyclone_id, location, recorded_at, wind_speed_kts, pressure_mb, storm_type, is_forecast)
+            VALUES ($1, ST_MakePoint($2,$3)::geography, $4, $5, $6, $7, FALSE)
+          `, [created[0].id, lon, lat, lastUpdate, windKts, pressureMb, type]);
+        }
+      }
+      upserted++;
+    }
+
+    // Mark JTWC storms no longer in feed as inactive
+    if (seenIds.length > 0) {
+      await this.db.query(
+        `UPDATE cyclones SET is_active=FALSE WHERE is_active=TRUE AND storm_id LIKE 'JTWC_%' AND storm_id NOT IN (${seenIds.map((_, i) => `$${i + 1}`).join(',')})`,
+        seenIds,
+      );
+    } else {
+      await this.db.query(`UPDATE cyclones SET is_active=FALSE WHERE is_active=TRUE AND storm_id LIKE 'JTWC_%'`);
+    }
+
+    if (upserted > 0) this.logger.log(`JTWC ingest: ${upserted} active storms`);
     return upserted;
   }
 }
