@@ -204,51 +204,58 @@ export class CycloneService {
     return 'unknown';
   }
 
+  private classifyFromWind(windKts: number | null, basin: string): string {
+    if (!windKts) return 'tropical_storm';
+    const isWPac = basin.toLowerCase().includes('western') || basin.toLowerCase().includes('north indian') || basin.toLowerCase().includes('south');
+    if (windKts >= 64) {
+      if (isWPac) return windKts >= 130 ? 'super_typhoon' : 'typhoon';
+      return 'hurricane';
+    }
+    if (windKts >= 34) return 'tropical_storm';
+    return 'tropical_depression';
+  }
+
   async ingestJTWC(): Promise<number> {
-    let xmlData: string;
+    let features: Record<string, unknown>[];
     try {
-      const res = await axios.get<string>('https://www.gdacs.org/xml/rss_tc.xml', {
-        timeout: 15000, httpsAgent: ipv4HttpsAgent, responseType: 'text',
+      const today = new Date().toISOString().split('T')[0];
+      const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const url = `https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH?eventlist=TC&alertlevel=red;orange;green&fromdate=${weekAgo}&todate=${today}`;
+      const res = await axios.get<{ features: Record<string, unknown>[] }>(url, {
+        timeout: 15000,
+        httpsAgent: ipv4HttpsAgent,
+        headers: { 'User-Agent': 'HazardWatch/1.0 (+https://hazardwatch-teal.vercel.app)' },
       });
-      xmlData = res.data;
+      features = (res.data.features ?? []).filter((f: Record<string, unknown>) => (f.properties as Record<string, unknown>)?.iscurrent === 'true');
     } catch (err) {
       this.logger.warn(`GDACS fetch failed: ${(err as Error).message}`);
       return 0;
     }
 
-    this.logger.log(`GDACS feed fetched: ${xmlData.length} chars`);
-    const items = xmlData.match(/<item>[\s\S]*?<\/item>/g) ?? [];
-    this.logger.log(`GDACS items found: ${items.length}`);
+    this.logger.log(`GDACS features: ${features.length} active storms`);
     let upserted = 0;
     const seenIds: string[] = [];
 
-    for (const item of items) {
-      const titleMatch = item.match(/<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/);
-      const pointMatch = item.match(/<georss:point>([\d.-]+)\s+([\d.-]+)<\/georss:point>/);
-      const severityMatch = item.match(/<gdacs:severity[^>]*value="([\d.]+)"/);
-      const eventIdMatch = item.match(/<gdacs:eventid[^>]*>([\d]+)<\/gdacs:eventid>/);
-      const pubDateMatch = item.match(/<pubDate>([\s\S]*?)<\/pubDate>/);
+    for (const feature of features) {
+      const p = feature.properties as Record<string, unknown>;
+      const geom = feature.geometry as { coordinates: number[] };
+      if (!geom?.coordinates || geom.coordinates.length < 2) continue;
 
-      if (!titleMatch || !pointMatch || !eventIdMatch) continue;
-
-      const title = titleMatch[1].trim();
-      const lat = parseFloat(pointMatch[1]);
-      const lon = parseFloat(pointMatch[2]);
+      const lon = parseFloat(String(geom.coordinates[0]));
+      const lat = parseFloat(String(geom.coordinates[1]));
       if (isNaN(lat) || isNaN(lon)) continue;
 
-      const stormId = `JTWC_GDACS_${eventIdMatch[1]}`;
+      const stormId = `GDACS_TC_${p.eventid}`;
       seenIds.push(stormId);
 
-      const nameMatch = title.match(/([A-Z][A-Z0-9]*(?:-\d{2})?)\s*$/);
-      const name = nameMatch ? nameMatch[1] : title;
-      const typeStr = title.replace(name, '').trim();
-      const type = this.classifyJTWC(typeStr || title);
-
-      const windKmh = severityMatch ? parseFloat(severityMatch[1]) : null;
+      const name = String(p.eventname ?? 'Unknown');
+      const severityData = p.severitydata as Record<string, unknown>;
+      const windKmh = severityData?.severity ? parseFloat(String(severityData.severity)) : null;
       const windKts = windKmh ? Math.round(windKmh / 1.852) : null;
-      const category = ['typhoon','super_typhoon','hurricane'].includes(type) ? this.saffirSimpson(windKts) : null;
       const basin = this.inferBasin(lon, lat);
-      const lastUpdate = pubDateMatch ? new Date(pubDateMatch[1]) : new Date();
+      const type = this.classifyFromWind(windKts, basin);
+      const category = ['typhoon', 'super_typhoon', 'hurricane'].includes(type) ? this.saffirSimpson(windKts) : null;
+      const lastUpdate = p.datemodified ? new Date(String(p.datemodified)) : new Date();
 
       const { rows: existing } = await this.db.query('SELECT id FROM cyclones WHERE storm_id = $1', [stormId]);
       if (existing.length > 0) {
@@ -257,13 +264,13 @@ export class CycloneService {
             current_center=ST_MakePoint($6,$7)::geography,
             wind_speed_kts=$8, pressure_mb=NULL, last_updated_at=$9, raw_data=$10
           WHERE storm_id=$1
-        `, [stormId, name, basin, category, type, lon, lat, windKts, lastUpdate, JSON.stringify({ title })]);
+        `, [stormId, name, basin, category, type, lon, lat, windKts, lastUpdate, JSON.stringify(p)]);
       } else {
         await this.db.query(`
           INSERT INTO cyclones (storm_id, name, basin, category, storm_type, is_active, current_center,
             wind_speed_kts, pressure_mb, first_seen_at, last_updated_at, raw_data)
           VALUES ($1,$2,$3,$4,$5,TRUE,ST_MakePoint($6,$7)::geography,$8,NULL,$9,$9,$10)
-        `, [stormId, name, basin, category, type, lon, lat, windKts, lastUpdate, JSON.stringify({ title })]);
+        `, [stormId, name, basin, category, type, lon, lat, windKts, lastUpdate, JSON.stringify(p)]);
 
         const { rows: created } = await this.db.query('SELECT id FROM cyclones WHERE storm_id=$1', [stormId]);
         if (created[0]) {
@@ -279,11 +286,11 @@ export class CycloneService {
     if (seenIds.length > 0) {
       const placeholders = seenIds.map((_, i) => '$' + (i + 1)).join(',');
       await this.db.query(
-        `UPDATE cyclones SET is_active=FALSE WHERE is_active=TRUE AND storm_id LIKE 'JTWC_GDACS_%' AND storm_id NOT IN (${placeholders})`,
+        `UPDATE cyclones SET is_active=FALSE WHERE is_active=TRUE AND storm_id LIKE 'GDACS_TC_%' AND storm_id NOT IN (${placeholders})`,
         seenIds,
       );
     } else {
-      await this.db.query(`UPDATE cyclones SET is_active=FALSE WHERE is_active=TRUE AND storm_id LIKE 'JTWC_GDACS_%'`);
+      await this.db.query(`UPDATE cyclones SET is_active=FALSE WHERE is_active=TRUE AND storm_id LIKE 'GDACS_TC_%'`);
     }
 
     if (upserted > 0) this.logger.log(`GDACS ingest: ${upserted} active storms`);
