@@ -207,7 +207,7 @@ export class CycloneService {
   async ingestJTWC(): Promise<number> {
     let xmlData: string;
     try {
-      const res = await axios.get<string>('https://www.metoc.navy.mil/jtwc/rss/jtwc.rss', {
+      const res = await axios.get<string>('https://www.gdacs.org/xml/rss_tc.xml', {
         timeout: 15000, httpsAgent: ipv4HttpsAgent, responseType: 'text',
       });
       xmlData = res.data;
