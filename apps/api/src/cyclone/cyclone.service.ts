@@ -216,7 +216,9 @@ export class CycloneService {
       return 0;
     }
 
+    this.logger.log(`GDACS feed fetched: ${xmlData.length} chars`);
     const items = xmlData.match(/<item>[\s\S]*?<\/item>/g) ?? [];
+    this.logger.log(`GDACS items found: ${items.length}`);
     let upserted = 0;
     const seenIds: string[] = [];
 
